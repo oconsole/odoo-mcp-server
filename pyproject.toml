@@ -1,14 +1,41 @@
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
 [project]
-name = "odoo-mcp-server"
+name = "odoo-simple-mcp"
 version = "0.1.0"
 description = "MCP server for Odoo ERP — connect any AI agent to your Odoo instance"
 readme = "README.md"
 license = "MIT"
 requires-python = ">=3.11"
+authors = [
+    { name = "oconsole" },
+]
+keywords = ["odoo", "mcp", "erp", "ai", "model-context-protocol"]
+classifiers = [
+    "Development Status :: 4 - Beta",
+    "Intended Audience :: Developers",
+    "License :: OSI Approved :: MIT License",
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3.11",
+    "Programming Language :: Python :: 3.12",
+    "Programming Language :: Python :: 3.13",
+    "Topic :: Software Development :: Libraries",
+]
 dependencies = [
     "fastmcp>=2.0",
     "httpx>=0.27",
 ]
 
+[project.urls]
+Homepage = "https://github.com/oconsole/odoo-mcp-server"
+Repository = "https://github.com/oconsole/odoo-mcp-server"
+Issues = "https://github.com/oconsole/odoo-mcp-server/issues"
+
 [project.scripts]
 odoo-mcp-server = "odoo_mcp_server:main"
+
+[tool.hatch.build.targets.wheel]
+packages = ["."]
+only-include = ["odoo_mcp_server.py"]
