@@ -33,6 +33,7 @@ Environment variables:
 
 from __future__ import annotations
 
+import ast
 import json
 import logging
 import os
@@ -533,6 +534,438 @@ def odoo_doctor() -> str:
         "version": odoo.version,
         "summary": f"{ok_count}/{len(checks)} checks passed",
         "checks": checks,
+    }, default=str)
+
+
+# -- Model customization tools -----------------------------------------------
+
+@mcp.tool()
+def odoo_model_info(model: str) -> str:
+    """Get comprehensive metadata about an Odoo model in one call.
+
+    Returns the model's default sort order, record name field, field summary
+    (grouped by type), custom fields (x_ prefix), views, window actions,
+    and default values. Eliminates the need for multiple exploratory queries.
+
+    Args:
+        model: Odoo model technical name (e.g. "res.partner", "sale.order").
+
+    Returns:
+        JSON string with model metadata including fields, views, actions, and defaults.
+    """
+    result: dict[str, Any] = {"model": model}
+
+    # Model-level metadata from ir.model. ir.model exposes 'order' as a
+    # stored Char in both Odoo 18 and 19 (mirrors _order). However 'rec_name'
+    # is NOT a stored field — _rec_name is a class attr. Infer it from the
+    # fields list below.
+    try:
+        ir_models = odoo.search_read(
+            "ir.model",
+            domain=[["model", "=", model]],
+            fields=["name", "model", "order", "state", "transient"],
+            limit=1,
+        )
+        if not ir_models:
+            return json.dumps({"error": f"Model '{model}' not found. Check odoo_list_models."})
+        ir_model = ir_models[0]
+        result["name"] = ir_model.get("name", "")
+        result["default_order"] = ir_model.get("order", "id")
+        result["state"] = ir_model.get("state", "")
+        result["transient"] = ir_model.get("transient", False)
+        model_id = ir_model["id"]
+    except Exception as exc:
+        return json.dumps({"error": f"Failed to read ir.model: {exc}"})
+
+    # Field summary from ir.model.fields
+    try:
+        fields = odoo.search_read(
+            "ir.model.fields",
+            domain=[["model_id", "=", model_id]],
+            fields=["name", "field_description", "ttype", "required",
+                    "readonly", "store", "state", "relation",
+                    "selection_ids", "tracking"],
+            limit=500,
+        )
+        result["field_count"] = len(fields)
+
+        # Infer rec_name (Odoo's own fallback: use 'name' if it exists)
+        field_names = {f["name"] for f in fields}
+        result["rec_name"] = "name" if "name" in field_names else ("x_name" if "x_name" in field_names else "id")
+
+        # Group by type
+        by_type: dict[str, int] = {}
+        for f in fields:
+            t = f.get("ttype", "?")
+            by_type[t] = by_type.get(t, 0) + 1
+        result["fields_by_type"] = by_type
+
+        # Custom fields (user-created)
+        custom = [
+            {"name": f["name"], "type": f["ttype"], "label": f.get("field_description", "")}
+            for f in fields if f.get("state") == "manual" or f["name"].startswith("x_")
+        ]
+        result["custom_fields"] = custom
+
+        # Relational fields
+        relations = [
+            {"name": f["name"], "type": f["ttype"],
+             "target": f.get("relation", ""), "label": f.get("field_description", "")}
+            for f in fields if f.get("ttype") in ("many2one", "one2many", "many2many")
+        ]
+        result["relational_fields"] = relations
+
+        # Required fields
+        required = [
+            {"name": f["name"], "type": f["ttype"], "label": f.get("field_description", "")}
+            for f in fields if f.get("required")
+        ]
+        result["required_fields"] = required
+
+    except Exception as exc:
+        result["fields_error"] = str(exc)
+
+    # Views
+    try:
+        views = odoo.search_read(
+            "ir.ui.view",
+            domain=[["model", "=", model], ["inherit_id", "=", False]],
+            fields=["name", "type", "priority", "arch_db"],
+            limit=20, order="type, priority",
+        )
+        result["views"] = [
+            {"id": v["id"], "name": v.get("name", ""), "type": v.get("type", ""),
+             "priority": v.get("priority", 16)}
+            for v in views
+        ]
+    except Exception as exc:
+        result["views_error"] = str(exc)
+
+    # Window actions
+    try:
+        actions = odoo.search_read(
+            "ir.actions.act_window",
+            domain=[["res_model", "=", model]],
+            fields=["name", "domain", "context", "view_mode", "limit"],
+            limit=20,
+        )
+        result["actions"] = [
+            {"id": a["id"], "name": a.get("name", ""),
+             "domain": a.get("domain", ""), "context": a.get("context", ""),
+             "view_mode": a.get("view_mode", ""), "limit": a.get("limit", 80)}
+            for a in actions
+        ]
+    except Exception as exc:
+        result["actions_error"] = str(exc)
+
+    # Default values from ir.default
+    try:
+        field_ids = [f["id"] for f in fields] if fields else []
+        if field_ids:
+            defaults = odoo.search_read(
+                "ir.default",
+                domain=[["field_id", "in", field_ids]],
+                fields=["field_id", "json_value", "user_id", "company_id"],
+                limit=50,
+            )
+            result["defaults"] = [
+                {"field": d.get("field_id", [None, ""])[1] if isinstance(d.get("field_id"), list) else d.get("field_id", ""),
+                 "value": d.get("json_value", ""),
+                 "user_id": d.get("user_id", False),
+                 "company_id": d.get("company_id", False)}
+                for d in defaults
+            ]
+        else:
+            result["defaults"] = []
+    except Exception as exc:
+        result["defaults_error"] = str(exc)
+
+    return json.dumps(result, default=str)
+
+
+@mcp.tool()
+def odoo_set_default(
+    model: str,
+    field_name: str,
+    value: Any,
+    user_id: int | None = None,
+    company_id: int | None = None,
+) -> str:
+    """Set, update, or clear a field's default value.
+
+    Manages ir.default records with proper JSON encoding. Set value to null
+    to remove the default. Omit user_id for a global default.
+
+    Args:
+        model: Odoo model technical name (e.g. "product.template").
+        field_name: Field name (e.g. "invoice_policy").
+        value: Default value to set. Use the raw value — it will be JSON-encoded
+               automatically. Pass null to remove the default.
+        user_id: User ID for user-specific default. None or False = global default.
+        company_id: Company ID for company-specific default. None or False = all companies.
+
+    Returns:
+        JSON string confirming the operation.
+    """
+    _check_writable()
+
+    # Find the field_id
+    field_records = odoo.search_read(
+        "ir.model.fields",
+        domain=[["model", "=", model], ["name", "=", field_name]],
+        fields=["id", "name", "ttype", "field_description"],
+        limit=1,
+    )
+    if not field_records:
+        return json.dumps({
+            "error": f"Field '{field_name}' not found on model '{model}'. "
+                     f"Use odoo_get_fields('{model}') to see available fields."
+        })
+
+    field_id = field_records[0]["id"]
+    field_type = field_records[0].get("ttype", "")
+    field_label = field_records[0].get("field_description", field_name)
+
+    # Build domain to find existing default
+    search_domain: list = [["field_id", "=", field_id]]
+    if user_id:
+        search_domain.append(["user_id", "=", user_id])
+    else:
+        search_domain.append(["user_id", "=", False])
+    if company_id:
+        search_domain.append(["company_id", "=", company_id])
+    else:
+        search_domain.append(["company_id", "=", False])
+
+    existing = odoo.search_read(
+        "ir.default", domain=search_domain,
+        fields=["id", "json_value"], limit=1,
+    )
+
+    # Remove default
+    if value is None:
+        if existing:
+            odoo.unlink("ir.default", [existing[0]["id"]])
+            return json.dumps({
+                "model": model, "field": field_name, "operation": "removed",
+                "previous_value": existing[0].get("json_value"),
+            })
+        return json.dumps({
+            "model": model, "field": field_name, "operation": "no_default_found",
+        })
+
+    # JSON-encode the value
+    json_value = json.dumps(value)
+
+    if existing:
+        # Update existing default
+        old_value = existing[0].get("json_value")
+        odoo.write("ir.default", [existing[0]["id"]], {"json_value": json_value})
+        return json.dumps({
+            "model": model, "field": field_name, "field_label": field_label,
+            "field_type": field_type, "operation": "updated",
+            "previous_value": old_value, "new_value": json_value,
+            "user_id": user_id or False, "company_id": company_id or False,
+        })
+    else:
+        # Create new default
+        vals: dict[str, Any] = {"field_id": field_id, "json_value": json_value}
+        if user_id:
+            vals["user_id"] = user_id
+        if company_id:
+            vals["company_id"] = company_id
+        new_id = odoo.create("ir.default", vals)
+        return json.dumps({
+            "model": model, "field": field_name, "field_label": field_label,
+            "field_type": field_type, "operation": "created",
+            "new_value": json_value, "id": new_id,
+            "user_id": user_id or False, "company_id": company_id or False,
+        })
+
+
+@mcp.tool()
+def odoo_get_view(
+    model: str,
+    view_type: str = "form",
+) -> str:
+    """Get the fully rendered (merged) view for a model.
+
+    Returns the combined XML after all view inheritance is applied. This is
+    what the user actually sees — not the raw fragments in ir.ui.view.
+
+    Args:
+        model: Odoo model technical name (e.g. "sale.order").
+        view_type: View type — "form", "tree", "search", "kanban", "pivot",
+                   "graph", "calendar". Defaults to "form".
+
+    Returns:
+        JSON string with the rendered view XML, view ID, and field names used.
+    """
+    try:
+        view_data = odoo.execute(
+            model, "get_views",
+            [[False, view_type]],
+        )
+    except Exception:
+        # Fallback for older Odoo versions
+        try:
+            view_data = odoo.execute(
+                model, "fields_view_get",
+                view_type=view_type,
+            )
+        except Exception as exc:
+            return json.dumps({"error": f"Failed to get {view_type} view for {model}: {exc}"})
+
+    result: dict[str, Any] = {"model": model, "view_type": view_type}
+
+    # get_views returns a dict keyed by view type
+    if isinstance(view_data, dict) and "views" in view_data:
+        vdata = view_data["views"].get(view_type, {})
+        result["view_id"] = vdata.get("id")
+        result["arch"] = vdata.get("arch", "")
+        # Extract field names from the view's fields dict
+        fields_in_view = list(vdata.get("fields", {}).keys()) if "fields" in vdata else []
+        result["fields_in_view"] = fields_in_view
+    elif isinstance(view_data, dict):
+        # fields_view_get format
+        result["view_id"] = view_data.get("view_id")
+        result["arch"] = view_data.get("arch", "")
+        fields_in_view = list(view_data.get("fields", {}).keys()) if "fields" in view_data else []
+        result["fields_in_view"] = fields_in_view
+    else:
+        result["raw"] = view_data
+
+    # Truncate arch if very large
+    arch = result.get("arch", "")
+    if isinstance(arch, str) and len(arch) > 15000:
+        result["arch"] = arch[:15000] + f"\n<!-- ... truncated ({len(arch)} chars total) -->"
+        result["truncated"] = True
+
+    return json.dumps(result, default=str)
+
+
+@mcp.tool()
+def odoo_modify_action(
+    action_id: int | None = None,
+    model: str | None = None,
+    domain: str | None = None,
+    context: str | None = None,
+    order: str | None = None,
+    limit: int | None = None,
+    view_mode: str | None = None,
+) -> str:
+    """Modify a window action's properties to change list/form behavior.
+
+    Window actions (ir.actions.act_window) control how a model appears in the
+    UI — default filters, sort order, grouping, view modes, and record limits.
+
+    Provide action_id to modify a specific action, or model to find and list
+    actions for that model. Only provided fields are updated; others are unchanged.
+
+    Args:
+        action_id: ID of the ir.actions.act_window to modify. If omitted, uses
+                   model to find actions.
+        model: Model name to find actions for (used when action_id is not provided).
+        domain: New domain filter string, e.g. "[['state','=','sale']]".
+        context: New context string, e.g. "{'default_type': 'out_invoice',
+                 'search_default_posted': 1, 'group_by': 'partner_id'}".
+        order: Default sort order, e.g. "date_order desc, id desc". This sets
+               the action's context key 'default_order' or modifies the associated
+               tree view's default_order attribute.
+        limit: Default number of records per page (e.g. 40, 80, 200).
+        view_mode: Comma-separated view modes, e.g. "tree,form,kanban".
+
+    Returns:
+        JSON string with the action details before and after modification.
+    """
+    # Find the action
+    if action_id:
+        actions = odoo.search_read(
+            "ir.actions.act_window",
+            domain=[["id", "=", action_id]],
+            fields=["name", "res_model", "domain", "context", "view_mode", "limit"],
+            limit=1,
+        )
+    elif model:
+        actions = odoo.search_read(
+            "ir.actions.act_window",
+            domain=[["res_model", "=", model]],
+            fields=["name", "res_model", "domain", "context", "view_mode", "limit"],
+            limit=10, order="id",
+        )
+    else:
+        return json.dumps({"error": "Provide either action_id or model."})
+
+    if not actions:
+        target = f"action_id={action_id}" if action_id else f"model={model}"
+        return json.dumps({"error": f"No window actions found for {target}."})
+
+    # If no action_id and no modifications, just list actions
+    no_changes = all(v is None for v in [domain, context, order, limit, view_mode])
+    if not action_id and no_changes:
+        return json.dumps({
+            "model": model,
+            "actions": [
+                {"id": a["id"], "name": a.get("name", ""),
+                 "domain": a.get("domain", ""), "context": a.get("context", ""),
+                 "view_mode": a.get("view_mode", ""), "limit": a.get("limit", 80)}
+                for a in actions
+            ],
+        })
+
+    # If model provided without action_id, use the first action
+    action = actions[0]
+    aid = action["id"]
+
+    if no_changes:
+        return json.dumps({"action": action})
+
+    _check_writable()
+
+    # Build update values
+    before = {k: action.get(k) for k in ["domain", "context", "view_mode", "limit"]}
+    update_vals: dict[str, Any] = {}
+
+    if domain is not None:
+        update_vals["domain"] = domain
+    if context is not None:
+        update_vals["context"] = context
+    if view_mode is not None:
+        update_vals["view_mode"] = view_mode
+    if limit is not None:
+        update_vals["limit"] = limit
+
+    # Handle order by merging default_order into the context. Use the
+    # user-supplied context if provided in this same call, otherwise the
+    # current DB value. Parse with ast.literal_eval — eval() on DB strings
+    # would be remote code execution.
+    if order is not None:
+        ctx_source = update_vals.get("context", action.get("context", "")) or ""
+        try:
+            ctx_dict = ast.literal_eval(ctx_source) if ctx_source else {}
+            if not isinstance(ctx_dict, dict):
+                ctx_dict = {}
+        except (ValueError, SyntaxError):
+            ctx_dict = {}
+        ctx_dict["default_order"] = order
+        update_vals["context"] = repr(ctx_dict)
+
+    odoo.write("ir.actions.act_window", [aid], update_vals)
+
+    # Read back
+    updated = odoo.search_read(
+        "ir.actions.act_window",
+        domain=[["id", "=", aid]],
+        fields=["name", "res_model", "domain", "context", "view_mode", "limit"],
+        limit=1,
+    )
+    after = {k: updated[0].get(k) for k in ["domain", "context", "view_mode", "limit"]} if updated else {}
+
+    return json.dumps({
+        "action_id": aid, "name": action.get("name", ""),
+        "model": action.get("res_model", ""),
+        "operation": "updated",
+        "before": before, "after": after,
     }, default=str)
 
 
