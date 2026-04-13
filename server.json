@@ -1,0 +1,64 @@
+{
+  "$schema": "https://static.modelcontextprotocol.io/schemas/2025-12-11/server.schema.json",
+  "name": "io.github.oconsole/odoo-simple-mcp",
+  "description": "MCP server for Odoo ERP — CRUD, model inspection, and customization for Odoo 17-19",
+  "repository": {
+    "url": "https://github.com/oconsole/odoo-mcp-server",
+    "source": "github"
+  },
+  "version": "0.1.0",
+  "packages": [
+    {
+      "registryType": "pypi",
+      "identifier": "odoo-simple-mcp",
+      "version": "0.1.0",
+      "transport": {
+        "type": "stdio"
+      },
+      "environmentVariables": [
+        {
+          "description": "Odoo instance URL",
+          "isRequired": true,
+          "format": "string",
+          "isSecret": false,
+          "name": "ODOO_URL"
+        },
+        {
+          "description": "Odoo database name",
+          "isRequired": true,
+          "format": "string",
+          "isSecret": false,
+          "name": "ODOO_DB"
+        },
+        {
+          "description": "Odoo login username",
+          "isRequired": true,
+          "format": "string",
+          "isSecret": false,
+          "name": "ODOO_USER"
+        },
+        {
+          "description": "Odoo password (Odoo 17-18)",
+          "isRequired": false,
+          "format": "string",
+          "isSecret": true,
+          "name": "ODOO_PASSWORD"
+        },
+        {
+          "description": "Odoo API key (Odoo 19+, preferred)",
+          "isRequired": false,
+          "format": "string",
+          "isSecret": true,
+          "name": "ODOO_API_KEY"
+        },
+        {
+          "description": "Set to 'true' to disable all write operations",
+          "isRequired": false,
+          "format": "string",
+          "isSecret": false,
+          "name": "ODOO_READONLY"
+        }
+      ]
+    }
+  ]
+}

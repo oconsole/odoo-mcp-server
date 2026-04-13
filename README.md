@@ -263,3 +263,5 @@ The server authenticates once at startup and maintains a persistent connection. 
 ## License
 
 MIT
+
+<!-- mcp-name: io.github.oconsole/odoo-simple-mcp -->
