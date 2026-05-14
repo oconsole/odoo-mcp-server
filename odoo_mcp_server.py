@@ -71,6 +71,7 @@ class OdooClient:
         self.api_key = api_key
         self.uid: Optional[int] = None
         self.version: Optional[str] = None
+        self._use_json2 = False
         self._http = httpx.Client(timeout=30.0)
 
     # -- auth ----------------------------------------------------------------
@@ -80,6 +81,11 @@ class OdooClient:
 
         if self.api_key and self._is_v19_plus():
             self.uid = self._auth_json2()
+            self._use_json2 = bool(self.uid)
+            if not self.uid:
+                # JSON-2 is opt-in even on v19+. Fall back to classic JSON-RPC
+                # so an API key works on instances without the JSON-2 module.
+                self.uid = self._auth_jsonrpc()
         else:
             self.uid = self._auth_jsonrpc()
 
@@ -112,7 +118,7 @@ class OdooClient:
             result = self._jsonrpc(
                 f"{self.url}/jsonrpc", "call",
                 service="common", method="authenticate",
-                args=[self.database, self.username, self.password or "", {}],
+                args=[self.database, self.username, (self.password or self.api_key or ""), {}],
             )
             return result if isinstance(result, int) else None
         except Exception as exc:
@@ -137,7 +143,7 @@ class OdooClient:
     def execute(self, model: str, method: str, *args: Any, **kwargs: Any) -> Any:
         if self.uid is None:
             raise OdooConnectionError("Not authenticated.")
-        if self._is_v19_plus() and self.api_key:
+        if self._use_json2:
             return self._exec_json2(model, method, *args, **kwargs)
         return self._exec_jsonrpc(model, method, *args, **kwargs)
 
@@ -145,7 +151,7 @@ class OdooClient:
         return self._jsonrpc(
             f"{self.url}/jsonrpc", "call",
             service="object", method="execute_kw",
-            args=[self.database, self.uid, self.password or "",
+            args=[self.database, self.uid, (self.password or self.api_key or ""),
                   model, method, list(args), kwargs],
         )
 
