@@ -6,6 +6,20 @@ Supports **Odoo 17-18** (JSON-RPC) and **Odoo 19+** (JSON-2 API) — auto-detect
 
 ![Odoo MCP Server Overview](odoo-mcp.gif)
 
+## Hosted option: OConsole
+
+If you would rather not run the server yourself, [OConsole](https://www.odooconsole.com) hosts Odoo 19 Community with this MCP server already connected. Add one URL to Claude, ChatGPT, Cursor or VS Code and sign in:
+
+```
+https://mcp.odooconsole.com/mcp
+```
+
+Sign-in uses OAuth, so there are no API keys or environment variables to set. A free plan is available. The [MCP reference](https://www.odooconsole.com/docs/mcp) lists the scopes and tools.
+
+OConsole is an independent service and is not affiliated with or endorsed by Odoo S.A.
+
+The rest of this README covers running the server yourself against any Odoo 17 to 19 instance.
+
 ## Quick Start
 
 ```bash
